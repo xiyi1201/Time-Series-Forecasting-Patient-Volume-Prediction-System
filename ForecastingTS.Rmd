@@ -1,0 +1,260 @@
+---
+title: "Healthcare Project 1"
+output: html_document
+date: "2024-10-09"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r data-preprocess}
+# Load necessary libraries
+library(forecast)
+library(ggplot2)
+library(tseries)
+library(readr)
+library(lubridate)
+library(tidyverse)
+
+# Load the dataset (assuming you have saved PatientVolume.csv file)
+data <- read_csv("PatientVolume.csv")
+
+# Convert the Date column to Date type
+data$Date <- as.Date(data$Date, format = "%m/%d/%Y")
+data$WeekDay <- as.factor(data$WeekDay)
+# Create dummy variables for 'WeekDay'
+weekday_dummies <- model.matrix(~ WeekDay - 1, data = data)
+# Convert the resulting matrix to a dataframe for easier manipulation
+weekday_dummies_df <- as.data.frame(weekday_dummies)
+# Drop one of the dummy columns to prevent perfect multicollinearity
+weekday_dummies_df <- weekday_dummies_df %>% select(-WeekDayMon) 
+# Combine dummy variables with the original 'Data' dataframe
+data <- cbind(data, weekday_dummies_df)
+```
+
+```{r}
+library(magick)
+img <- image_read("~/Desktop/Healthcare/Project/Project 1/illustration.JPG")
+print("See the following graph for reference of our predicted patient volumes for each shift and calculation of MAD for each model:")
+print(img)
+```
+
+```{r}
+# Splitting the dataset into training and testing datasets based on different periods
+# Using the Date column to filter data for different training periods
+end_date_6_months <- min(data$Date) + months(6)
+end_date_1_year <- min(data$Date) + years(1)
+end_date_18_months <- min(data$Date) + months(18)
+end_date_2_years <- min(data$Date) + years(2)
+
+train_6_months <- data %>% filter(Date <= end_date_6_months)
+train_1_year <- data %>% filter(Date <= end_date_1_year)
+train_18_months <- data %>% filter(Date <= end_date_18_months)
+train_2_years <- data %>% filter(Date <= end_date_2_years)
+
+test_data_6_months <- data %>% filter(Date > end_date_6_months)
+test_data_1_year <- data %>% filter(Date > end_date_1_year)
+test_data_18_months <- data %>% filter(Date > end_date_18_months)
+test_data_2_years <- data %>% filter(Date > end_date_2_years)
+
+# Convert training and testing data to time series format
+train_6_months_ts <- ts(train_6_months$PatientVolume, frequency = 24)
+train_1_year_ts <- ts(train_1_year$PatientVolume, frequency = 24)
+train_18_months_ts <- ts(train_18_months$PatientVolume, frequency = 24)
+train_2_years_ts <- ts(train_2_years$PatientVolume, frequency = 24)
+
+test_data_6_months_ts <- ts(test_data_6_months$PatientVolume, frequency = 24)
+test_data_1_year_ts <- ts(test_data_1_year$PatientVolume, frequency = 24)
+test_data_18_months_ts <- ts(test_data_18_months$PatientVolume, frequency = 24)
+test_data_2_years_ts <- ts(test_data_2_years$PatientVolume, frequency = 24)
+
+# Seasonal dummy
+# Extract dummy variables for training periods
+xreg_6_months <- train_6_months[, colnames(weekday_dummies_df)]
+xreg_1_year <- train_1_year[, colnames(weekday_dummies_df)]
+xreg_18_months <- train_18_months[, colnames(weekday_dummies_df)]
+xreg_2_years <- train_2_years[, colnames(weekday_dummies_df)]
+# Extract corresponding dummy variables for the test periods
+test_xreg_6_months <- test_data_6_months[, colnames(weekday_dummies_df)]
+test_xreg_1_year <- test_data_1_year[, colnames(weekday_dummies_df)]
+test_xreg_18_months <- test_data_18_months[, colnames(weekday_dummies_df)]
+test_xreg_2_years <- test_data_2_years[, colnames(weekday_dummies_df)]
+# seasonal_ind1 = seasonaldummy(train_6_months_ts)
+# seasonal_ind2 = seasonaldummy(train_6_months_ts)
+# seasonal_ind3 = seasonaldummy(train_6_months_ts)
+# seasonal_ind4 = seasonaldummy(train_6_months_ts)
+
+# Train ARIMA models using different training periods
+models <- list(
+  arima_6_months = auto.arima(train_6_months_ts, xreg = as.matrix(xreg_6_months)),
+  # Uncomment below to train additional models with respective dummy variables
+  arima_1_year = auto.arima(train_1_year_ts, xreg = as.matrix(xreg_1_year)),
+  arima_18_months = auto.arima(train_18_months_ts, xreg = as.matrix(xreg_18_months)),
+  arima_2_years = auto.arima(train_2_years_ts, xreg = as.matrix(xreg_2_years))
+)
+
+# Function to calculate MAD
+mad_metric <- function(actual, predicted) {
+  return(mean(abs(actual - predicted)))
+}
+# Predict patient volumes for each shift and calculate MAD for each model
+mad_values <- c()
+
+for (model_name in names(models)) {
+  model <- models[[model_name]]
+  
+  # Extract appropriate test data and corresponding xreg based on model name
+  if (model_name == "arima_6_months") {
+    actual_test_ts <- test_data_6_months_ts
+    test_xreg <- test_xreg_6_months
+  } else if (model_name == "arima_1_year") {
+    actual_test_ts <- test_data_1_year_ts
+    test_xreg <- test_xreg_1_year
+  } else if (model_name == "arima_18_months") {
+    actual_test_ts <- test_data_18_months_ts
+    test_xreg <- test_xreg_18_months
+  } else if (model_name == "arima_2_years") {
+    actual_test_ts <- test_data_2_years_ts
+    test_xreg <- test_xreg_2_years
+  }
+  
+  # Predict for 7:00AM to 2:00PM (at 3:00AM)
+  actual_7am_shift <- window(actual_test_ts, start = 7, end = 14)  # Extract actual values for 7AM to 2PM shift
+  h_pred_7am <- length(actual_7am_shift)  # Set prediction horizon to match the actual data length
+  pred_7am_shift <- ts(forecast(model, xreg = as.matrix(test_xreg[1:h_pred_7am, ]), h = h_pred_7am)$mean,
+                       start = start(actual_7am_shift), frequency = frequency(actual_7am_shift))  # Forecast with `xreg`
+  mad_7am <- mad_metric(actual_7am_shift, pred_7am_shift)
+  
+  # Predict for 3:00PM to 10:00PM (at 11:00AM)
+  extended_train_3pm <- c(train_6_months_ts, pred_7am_shift) # Extend training data with predictions from 7AM shift
+  model_extended_3pm <- Arima(extended_train_3pm, model = model, xreg = as.matrix(rbind(xreg_6_months, test_xreg[1:h_pred_7am, ]))) # Refit with extended data and exogenous variables
+  actual_3pm_shift <- window(actual_test_ts, start = 15, end = 22)  # Extract actual values for 3PM to 10PM shift
+  h_pred_3pm <- length(actual_3pm_shift)  # Set prediction horizon to match the actual data length
+  pred_3pm_shift <- ts(forecast(model_extended_3pm, xreg = as.matrix(test_xreg[(h_pred_7am + 1):(h_pred_7am + h_pred_3pm), ]), h = h_pred_3pm)$mean,
+                       start = start(actual_3pm_shift), frequency = frequency(actual_3pm_shift))
+  mad_3pm <- mad_metric(actual_3pm_shift, pred_3pm_shift)
+  
+  # Predict for 11:00PM to 6:00AM (at 7:00PM)
+  extended_train_11pm <- c(train_6_months_ts, pred_7am_shift, pred_3pm_shift) # Extend training data with previous predictions
+  model_extended_11pm <- Arima(extended_train_11pm, model = model, xreg = as.matrix(rbind(xreg_6_months, test_xreg[1:(h_pred_7am + h_pred_3pm), ]))) # Refit with extended data and exogenous variables
+  actual_11pm_shift <- window(actual_test_ts, start = 23, end = 30)  # Extract actual values for 11PM to 6AM shift
+  h_pred_11pm <- length(actual_11pm_shift)  # Set prediction horizon to match the actual data length
+  pred_11pm_shift <- ts(forecast(model_extended_11pm, xreg = as.matrix(test_xreg[(h_pred_7am + h_pred_3pm + 1):(h_pred_7am + h_pred_3pm + h_pred_11pm), ]), h = h_pred_11pm)$mean,
+                        start = start(actual_11pm_shift), frequency = frequency(actual_11pm_shift))
+  mad_11pm <- mad_metric(actual_11pm_shift, pred_11pm_shift)
+  
+  # Calculate average MAD for all shifts
+  avg_mad <- mean(c(mad_7am, mad_3pm, mad_11pm))
+  mad_values <- c(mad_values, avg_mad)
+}
+
+##########
+
+# Assign names to MAD values
+names(mad_values) <- names(models)
+print(mad_values)
+print(models)
+```
+
+From the above results, we can see the model that has the smallest MAD
+error is the one using arima_2_years as training data set. It is with an
+ARIMA component using the ARIMA(4,0,1)(2,1,0) model. This model includes
+autoregressive (AR) terms, a moving average (MA) term, and seasonal
+autoregressive (SAR) terms, along with regressors for day-of-the-week
+effects.
+
+Model Interpretation: 
+
+-   **Autoregressive (AR) Terms**: The coefficients for AR(1), AR(2),
+    AR(3), and AR(4) suggest that the model is using four previous time
+    steps to predict the current value. The largest impact comes from
+    AR(2) with a value of $\phi_2 = 0.3827$.
+
+-   **Moving Average (MA) Term**: The MA(1) coefficient,
+    $\theta_1 = 0.4048$, represents the influence of the previous error
+    on the current forecast.
+
+-   **Seasonal Autoregressive (SAR) Terms**: The SAR(1) and SAR(2) terms
+    capture seasonal patterns over a longer period. The negative values
+    for $\Phi_1 = -0.6624$ and $\Phi_2 = -0.3406$ indicate that
+    seasonality has an inverse impact over time.
+
+-   **Day-of-the-Week Regressors**: The weekday dummy variables show the
+    effect of each day of the week on the forecast. For example:
+
+    -   Fridays ($\text{WeekDayFri} = -8.4507$) and Saturdays
+        ($\text{WeekDaySat} = -15.1009$) have a significant negative
+        effect on the predicted values.
+    -   Tuesdays ($\text{WeekDayTue} = 3.0089$) have a positive effect,
+        while other weekdays (like Wednesday, Thursday, and Sunday) have
+        varying levels of negative effects.
+
+```{r}
+# Selecting the best model based on the lowest MAD
+best_model_name <- names(which.min(mad_values))
+best_model <- models[[best_model_name]]
+
+# Plotting the residuals and Q-Q plot for the best model
+residuals_best_model <- residuals(best_model)
+
+# Q-Q plot to check normality
+qqnorm(residuals_best_model)
+qqline(residuals_best_model, col = "red")
+
+# Plot ACF of residuals
+acf(residuals_best_model, main = "ACF of Residuals for Best Model")
+
+# Plotting combined actual and predicted values for 11:00PM to 6:00AM shift
+combined_ts <- ts(c(actual_11pm_shift, pred_11pm_shift), frequency = 8)
+time_index <- time(actual_11pm_shift)
+forecast_index <- time(pred_11pm_shift)
+
+ggplot() +
+  geom_line(aes(x = time_index, y = as.numeric(actual_11pm_shift)), color = "blue", size = 1.2) +
+  geom_line(aes(x = forecast_index, y = as.numeric(pred_11pm_shift)), color = "red", size = 1.2, linetype = "dashed") +
+  labs(title = "Actual vs Predicted Patient Volume (11:00PM to 6:00AM Shift)",
+       x = "Time",
+       y = "Patient Volume") +
+  theme_minimal()
+```
+
+From the QQ-PLOT above we can see that the error is lied along the 45
+degree line. So the normality tests show that these errors are normally
+distributed.
+
+As for possibility for further improvement in the model, we can tell
+from the difference between the plotted graph and actual still exists.
+To improve the ARIMA model after accounting for seasonality of week and
+day, we can:
+
+1.  Incorporate Exogenous Variables (ARIMAX): If external factors
+    influence patient volume, such as holidays, weather conditions, or
+    public health events, you can include these variables in an ARIMAX
+    model. For instance:
+
+-   Weather data (e.g., temperature, humidity)
+-   Holidays or special events
+-   Staffing levels or schedules
+
+2.  Consider non-linear models like SARIMA or TBATS:
+
+SARIMA (Seasonal ARIMA) explicitly models seasonal patterns. TBATS
+(Trigonometric, Box-Cox, ARMA errors, Trend, and Seasonal) handles
+complex seasonality and multiple seasonalities better than ARIMA,
+especially when dealing with multiple seasonal cycles (e.g., daily and
+weekly).
+
+3.  Consider interactions between these terms. There might be
+    interactions between the weekly and daily cycles that the model is
+    not capturing well.
+
+4.  Use More Advanced Time Series Models Consider more advanced methods
+    such as: Prophet (Facebook): Automatically detects change points in
+    the trend and handles seasonality well. Long Short-Term Memory
+    (LSTM) or Recurrent Neural Networks (RNN): Deep learning models,
+    particularly LSTM, are capable of capturing long-term dependencies
+    in time series data.
